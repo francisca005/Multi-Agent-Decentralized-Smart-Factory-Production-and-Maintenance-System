@@ -1,134 +1,93 @@
 # agents/machine_cnp_agent.py
-import asyncio
-from spade.behaviour import CyclicBehaviour
 from agents.base_agent import FactoryAgent
-
-def build_batch_str(batch: dict) -> str:
-    return f"ingredients: flour={batch['flour']}, sugar={batch['sugar']}, butter={batch['butter']}"
+from spade.behaviour import CyclicBehaviour
+from spade.message import Message
+import asyncio
+import random
 
 class MachineCNPAgent(FactoryAgent):
-    """
-    Initiator do Contract Net:
-      1) envia CFP para todos os suppliers
-      2) recolhe PROPOSE/REFUSE até timeout
-      3) seleciona melhor proposta (lead_time -> custo como desempate)
-      4) envia ACCEPT ao vencedor e REJECT aos restantes
-      5) espera INFORM do vencedor e atualiza métricas / estado local
-    """
-    def __init__(self, jid, password, *, supplier_jids, request_batch=None, cfp_timeout=3, inform_timeout=10):
-        super().__init__(jid, password)
-        self.supplier_jids = supplier_jids
-        self.request_batch = request_batch or {"flour": 10, "sugar": 5, "butter": 3}
+    def __init__(self, jid, password, env=None,
+                 suppliers=None, batch=None,
+                 cfp_timeout=3, inform_timeout=5, name="Machine"):
+        super().__init__(jid, password, env)
+        self.suppliers = suppliers or []
+        self.batch = batch or {"flour": 10, "sugar": 5, "butter": 3}
         self.cfp_timeout = cfp_timeout
         self.inform_timeout = inform_timeout
+        self.agent_name = name
 
-    class Initiator(CyclicBehaviour):
+    async def setup(self):
+        await self.log(f"(CNP Initiator {self.agent_name}) suppliers={self.suppliers} | batch={self.batch}")
+        self.add_behaviour(self.CNPInitiator())
+
+    # =============================================================
+    #  CNP INITIATOR BEHAVIOUR
+    # =============================================================
+    class CNPInitiator(CyclicBehaviour):
         async def run(self):
-            # 1) CFP para todos
-            body = build_batch_str(self.agent.request_batch)
-            for to_jid in self.agent.supplier_jids:
-                msg = self.agent.create_message(
-                    to_jid=to_jid,
-                    body=body,
-                    performative="cfp",
-                    protocol="cnp",
-                )
+            agent = self.agent
+
+            # preparar mensagem CFP
+            body = f"ingredients: flour={agent.batch['flour']}, sugar={agent.batch['sugar']}, butter={agent.batch['butter']}"
+            msg_template = Message()
+            msg_template.set_metadata("protocol", "cnp")
+            msg_template.set_metadata("performative", "cfp")
+
+            for supplier in self.agent.suppliers:
+                msg = Message(to=supplier)
+                msg.set_metadata("performative", "cfp")
+                msg.set_metadata("protocol", "cnp")
+                msg.thread = f"cnp-{self.agent.name}-{self.agent.env.time}"
+                msg.body = body
                 await self.send(msg)
+                await self.agent.log(f"[{self.agent.name}] [CNP] CFP enviado a {supplier}: {msg.body}")
+
+            # Atualiza métricas globais
+            await self.agent.log(f"[{self.agent.name}] [CNP] CFP enviado a {len(self.agent.suppliers)} suppliers: {body}")
             self.agent.env.metrics["cnp_cfp"] += 1
-            await self.agent.log(f"[CNP] CFP enviado a {len(self.agent.supplier_jids)} suppliers: {body}")
 
-            # 2) recolher propostas
-            proposals = []  # cada item: (from_jid, lead_time:int, cost:int)
-            repliers = set()
-            end_time = self.agent.env.time + self.agent.cfp_timeout
-            while self.agent.env.time < end_time:
-                reply = await self.receive(timeout=0.3)
-                if not reply:
-                    continue
-                if reply.get_metadata("protocol") != "cnp":
-                    continue
+            proposals = []
+            end_time = asyncio.get_event_loop().time() + agent.cfp_timeout
 
-                perf = reply.get_metadata("performative")
-                repliers.add(str(reply.sender))
-                if perf == "propose":
-                    # parse lead_time e cost do body
-                    lead_time, cost = 999, 999
-                    try:
-                        frag = (reply.body or "")
-                        # "offer: lead_time=3; cost=12; batch={...}"
-                        lpart = frag.split("lead_time=")[1]
-                        lead_time = int(lpart.split(";")[0].strip())
-                        cpart = frag.split("cost=")[1]
-                        cost = int(cpart.split(";")[0].strip())
-                    except:
-                        pass
-                    proposals.append((str(reply.sender), lead_time, cost))
-                    self.agent.env.metrics["cnp_proposals"] += 1
-                    await self.agent.log(f"[CNP] PROPOSE de {reply.sender}: lead_time={lead_time}, cost={cost}")
-
-                elif perf == "refuse":
-                    await self.agent.log(f"[CNP] REFUSE de {reply.sender}: {reply.body}")
+            while asyncio.get_event_loop().time() < end_time:
+                reply = await self.receive(timeout=0.5)
+                if reply:
+                    pf = reply.metadata.get("performative")
+                    if pf == "propose":
+                        data = reply.body.split(";")
+                        lead_time = int(data[0].split("=")[1])
+                        cost = int(data[1].split("=")[1])
+                        proposals.append((str(reply.sender), lead_time, cost))
+                        await agent.log(f"[CNP] PROPOSE de {reply.sender}: lead_time={lead_time}, cost={cost}")
+                    elif pf == "refuse":
+                        await agent.log(f"[CNP] REFUSE de {reply.sender}: {reply.body}")
 
             if not proposals:
-                await self.agent.log("[CNP] Sem propostas. Vai tentar de novo mais tarde.")
                 await asyncio.sleep(2)
                 return
 
-            # 3) selecionar melhor (min lead_time, depois min cost)
-            proposals.sort(key=lambda x: (x[1], x[2]))
-            winner, win_time, win_cost = proposals[0]
-            losers = [jid for (jid, _, _) in proposals[1:]]
-            await self.agent.log(f"[CNP] VENCEDOR: {winner} (lead_time={win_time}, cost={win_cost}). Losers={len(losers)}")
+            winner = min(proposals, key=lambda x: x[2])
+            losers = [p for p in proposals if p != winner]
+            await agent.log(f"[CNP] VENCEDOR: {winner[0]} (lead_time={winner[1]}, cost={winner[2]}). Losers={len(losers)}")
 
-            # 4) enviar ACCEPT ao vencedor e REJECT aos restantes
-            batch_str = build_batch_str(self.agent.request_batch)
-            # inclui lead_time no corpo para o supplier poder simular entrega
-            accept = self.agent.create_message(
-                to_jid=winner,
-                body=f"{batch_str}; lead_time={win_time}",
-                performative="accept-proposal",
-                protocol="cnp",
-            )
-            await self.send(accept)
-            self.agent.env.metrics["cnp_accepts"] += 1
+            for s, _, _ in losers:
+                rej = Message(to=s)
+                rej.set_metadata("protocol", "cnp")
+                rej.set_metadata("performative", "reject-proposal")
+                rej.body = "rejected"
+                await self.send(rej)
 
-            for l in losers:
-                reject = self.agent.create_message(
-                    to_jid=l,
-                    body=batch_str,
-                    performative="reject-proposal",
-                    protocol="cnp",
-                )
-                await self.send(reject)
-                self.agent.env.metrics["cnp_rejects"] += 1
+            acc = Message(to=winner[0])
+            acc.set_metadata("protocol", "cnp")
+            acc.set_metadata("performative", "accept-proposal")
+            acc.body = "accepted"
+            await self.send(acc)
 
-            # 5) aguardar INFORM do vencedor
-            informed = False
-            end_info = self.agent.env.time + self.agent.inform_timeout
-            while self.agent.env.time < end_info:
-                inf = await self.receive(timeout=0.5)
-                if inf and inf.get_metadata("protocol") == "cnp" and inf.get_metadata("performative") == "inform":
-                    await self.agent.log(f"[CNP] INFORM do vencedor: {inf.body}")
-                    # atualizar métricas globais (opcional: também stock local se quiseres)
-                    batch = self.agent.request_batch
-                    self.agent.env.metrics["requests_ok"] += 1
-                    self.agent.env.metrics["delivered_flour"] += batch["flour"]
-                    self.agent.env.metrics["delivered_sugar"] += batch["sugar"]
-                    self.agent.env.metrics["delivered_butter"] += batch["butter"]
-                    # contagem por fornecedor (A/B)
-                    if "@a" in winner or "suppliera" in winner:
-                        self.agent.env.metrics["cnp_wins_supplier_a"] += 1
-                    else:
-                        self.agent.env.metrics["cnp_wins_supplier_b"] += 1
+            reply = await self.receive(timeout=agent.inform_timeout)
+            if reply and reply.metadata.get("performative") == "inform":
+                await agent.log(f"[CNP] INFORM do vencedor: {reply.body}")
+                agent.env.metrics["cnp_accepts"] += 1
+            else:
+                await agent.log("[CNP] Timeout à espera de INFORM do vencedor")
 
-                    informed = True
-                    break
-
-            if not informed:
-                await self.agent.log("[CNP] Timeout à espera do INFORM do vencedor.")
-
-            await asyncio.sleep(2)  # espaçar rondas de CNP
-
-    async def setup(self):
-        await self.log(f"(CNP Initiator) suppliers={self.supplier_jids} | batch={self.request_batch} | timeout(CFP)={self.cfp_timeout}s")
-        self.add_behaviour(self.Initiator())
+            await asyncio.sleep(random.uniform(3, 6))
