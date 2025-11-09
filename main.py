@@ -1,46 +1,66 @@
 # main.py
 import asyncio
-from agents.supervisor_agent import SupervisorAgent
+from environment import FactoryEnvironment
 from agents.supply_cnp_agent import SupplyCNPAgent
 from agents.machine_cnp_agent import MachineCNPAgent
+from agents.supervisor_agent import SupervisorAgent
 
-DOMAIN = "10.0.100.203"  # ajusta se necessário
-PWD = "1234"
+DOMAIN = "192.168.68.106"
+PWD = "12345"
 
 async def main():
-    # Dois fornecedores CNP com stocks/custos/lead_times "implícitos"
-    supplierA = SupplyCNPAgent(f"supplierA@{DOMAIN}", PWD, name="A",
-                               initial_stock={"flour": 60, "sugar": 40, "butter": 30})
-    supplierB = SupplyCNPAgent(f"supplierB@{DOMAIN}", PWD, name="B",
-                               initial_stock={"flour": 45, "sugar": 50, "butter": 25})
+    print("\nFase 4 – Multi-Machine Coordination iniciada.\n")
 
-    # Máquina initiator: envia CFP aos dois
-    machine = MachineCNPAgent(f"machine@{DOMAIN}", PWD,
-                              supplier_jids=[f"supplierA@{DOMAIN}", f"supplierB@{DOMAIN}"],
-                              request_batch={"flour": 10, "sugar": 5, "butter": 3},
-                              cfp_timeout=3, inform_timeout=10)
 
-    supervisor = SupervisorAgent(f"supervisor@{DOMAIN}", PWD,
-                                 supply_refill_every=9999,  # sem refill automático aqui
-                                 refill_amount={"flour": 0, "sugar": 0, "butter": 0})
-    supervisor.supply_agent_ref = None  # não usamos no CNP
+    env = FactoryEnvironment()
 
+    # === Suppliers ===
+    supplierA = SupplyCNPAgent(f"supplierA@{DOMAIN}", PWD, env=env,
+                               name="A",
+                               stock_init={"flour": 60, "sugar": 40, "butter": 30},
+                               capacity={"flour": 50, "sugar": 30, "butter": 20})
+    supplierB = SupplyCNPAgent(f"supplierB@{DOMAIN}", PWD, env=env,
+                               name="B",
+                               stock_init={"flour": 45, "sugar": 50, "butter": 25},
+                               capacity={"flour": 50, "sugar": 30, "butter": 20})
     await supplierA.start(auto_register=True)
     await supplierB.start(auto_register=True)
-    await machine.start(auto_register=True)
+
+    # === Machines ===
+    suppliers = [f"supplierA@{DOMAIN}", f"supplierB@{DOMAIN}"]
+    machine1 = MachineCNPAgent(f"machine1@{DOMAIN}", PWD, env=env,
+                               suppliers=suppliers,
+                               batch={"flour": 10, "sugar": 5, "butter": 3},
+                               name="M1")
+    machine2 = MachineCNPAgent(f"machine2@{DOMAIN}", PWD, env=env,
+                               suppliers=suppliers,
+                               batch={"flour": 8, "sugar": 4, "butter": 2},
+                               name="M2")
+    await machine1.start(auto_register=True)
+    await machine2.start(auto_register=True)
+
+    # === Supervisor ===
+    supervisor = SupervisorAgent(f"supervisor@{DOMAIN}", PWD, env=env,
+                                 supply_refill_every=10,
+                                 refill_amount={"flour": 30, "sugar": 20, "butter": 10},
+                                 supply_agent_ref=supplierA)
     await supervisor.start(auto_register=True)
 
-    print("Fase 3 (CNP) a correr: Machine ↔ SupplierA/SupplierB.")
+    MAX_TICKS = 500
+    idle_ticks = 0
 
-    # corre ~45s para observar várias rondas
-    await asyncio.sleep(45)
+    while env.time < MAX_TICKS:
+        await env.tick()
+        if env.metrics["cnp_cfp"] == env.metrics["cnp_accepts"]:
+            idle_ticks += 1
+        else:
+            idle_ticks = 0
+        if idle_ticks >= 10:
+            print("Nenhum novo contrato nos últimos 10 ticks. Terminando simulação.")
+            break
 
-    await supervisor.stop()
-    await machine.stop()
-    await supplierB.stop()
-    await supplierA.stop()
-
-    print("Execução terminada (CNP).")
+    await asyncio.sleep(50)
+    print("Execução terminada (Fase 4 – Multi-Machine CNP).")
 
 if __name__ == "__main__":
     asyncio.run(main())
