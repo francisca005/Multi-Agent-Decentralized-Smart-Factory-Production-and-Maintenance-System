@@ -49,7 +49,8 @@ async def main():
         batch={"flour": 10, "sugar": 5, "butter": 3},
         name="M1",
         maintenance=maintenance,
-        failure_rate=0.05
+        failure_rate=0.05,
+        capabilities=["cutting", "mixing", "baking"]
     )
     machine2 = MachineCNPAgent(
         f"machine2@{DOMAIN}", PWD, env=env,
@@ -57,7 +58,8 @@ async def main():
         batch={"flour": 8, "sugar": 4, "butter": 2},
         name="M2",
         maintenance=maintenance,
-        failure_rate=0.04
+        failure_rate=0.04,
+        capabilities=["mixing", "baking", "packaging"]
     )
 
     await machine1.start(auto_register=True)
