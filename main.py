@@ -33,9 +33,12 @@ async def main():
 
     # === Maintenance Agent ===
     maintenance = MaintenanceAgent(
-        f"maintenance@{DOMAIN}", PWD, env=env     # << correção
+        f"maintenance@{DOMAIN}", PWD, env=env
     )
     await maintenance.start(auto_register=True)
+
+    # 🔹 IMPORTANTE: dizer ao ambiente quem é o maintenance agent
+    env.set_maintenance_agent(maintenance)
 
     # === Machines ===
     suppliers = [f"supplierA@{DOMAIN}", f"supplierB@{DOMAIN}"]
@@ -73,21 +76,39 @@ async def main():
     MAX_TICKS = 500
     idle_ticks = 0
 
+    # lista de máquinas, para verificarmos se há jobs ativos
+    machines = [machine1, machine2]
+
     while env.time < MAX_TICKS:
+        # avança o tempo global
         await env.tick()
 
-        if env.metrics["cnp_cfp"] == env.metrics["cnp_accepts"]:
+        # há algum job ainda a ser processado ou em fila?
+        active_jobs = any(
+            (m.current_job is not None) or (len(m.job_queue) > 0)
+            for m in machines
+        )
+
+        # critério de "inatividade":
+        # - não há CNP pendentes (cnp_cfp == cnp_accepts)
+        # - E não há jobs em processamento
+        if env.metrics["cnp_cfp"] == env.metrics["cnp_accepts"] and not active_jobs:
             idle_ticks += 1
         else:
             idle_ticks = 0
 
         if idle_ticks >= 10:
-            print("Nenhum novo contrato nos últimos 10 ticks. Terminando simulação.")
+            print("Nenhum novo contrato nem jobs ativos nos últimos 10 ticks. Terminando simulação.")
             break
 
         await asyncio.sleep(0.1)
 
-    print("Execução terminada (Multi-Machine CNP + Manutenção).")
+    print("Execução terminada (Multi-Machine CNP + Pipeline + Manutenção).")
+
+    # === Mostrar métricas finais (útil para relatório) ===
+    print("\n=== MÉTRICAS FINAIS ===")
+    for k, v in env.metrics.items():
+        print(f"{k}: {v}")
 
     # === Stop Agents ===
     await machine1.stop()
@@ -100,5 +121,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
