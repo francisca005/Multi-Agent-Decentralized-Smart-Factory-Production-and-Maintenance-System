@@ -27,12 +27,18 @@ class FactoryEnvironment:
         self.agents = []
         self.maintenance_agent = None
         self.external_failure_rate = 0.0
+        self.global_job_id = 0
 
     def register_agent(self, agent):
         self.agents.append(agent)
 
     def set_maintenance_agent(self, agent):
         self.maintenance_agent = agent
+
+    def get_new_job_id(self):
+        self.global_job_id += 1
+        return self.global_job_id
+
 
     async def tick(self):
         """Avança 1 tick no tempo e processa reparações."""
