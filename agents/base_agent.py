@@ -11,3 +11,4 @@ class FactoryAgent(Agent):
         """Log message with timestamp and agent name."""
         now = datetime.datetime.now().strftime("%H:%M:%S")
         print(f"[{self.name}] {msg}")
+

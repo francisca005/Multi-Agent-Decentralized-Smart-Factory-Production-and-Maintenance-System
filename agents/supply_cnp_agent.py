@@ -61,4 +61,3 @@ class SupplyCNPAgent(FactoryAgent):
             elif pf == "reject-proposal":
                 await self.agent.log(f"[CNP/{self.agent.agent_name}] REJECT-PROPOSAL recebido. (ignora)")
 
-
