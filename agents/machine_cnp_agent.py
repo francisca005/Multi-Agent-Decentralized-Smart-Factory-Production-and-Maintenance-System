@@ -30,6 +30,7 @@ class MachineCNPAgent(FactoryAgent):
         name="Machine",
         maintenance=None,
         failure_rate=0.05,
+        capabilities=None,
     ):
         super().__init__(jid, password, env=env)
 
@@ -48,19 +49,23 @@ class MachineCNPAgent(FactoryAgent):
         self.is_machine = True  # usado para identificar máquinas no env
 
         # --- pipeline de produção ---
-        # capacidades declaradas (para o Passo B, delegação)
-        self.capabilities = ["cutting", "mixing", "baking", "packaging"]
+        # capacidade vêm do MAIN (ou default para todas)
+        self.capabilities = capabilities or ["cutting", "mixing", "baking", "packaging"]
 
-        # ordem fixa do pipeline deste agente
-        self.pipeline_stages = ["cutting", "mixing", "baking", "packaging"]
+        # full factory pipeline (universal reference)
+        full_pipeline = ["cutting", "mixing", "baking", "packaging"]
 
-        # duração (em ticks) de cada etapa
-        self.stage_times = {
+        # pipeline for this machine = only stages it is capable of doing
+        self.pipeline_stages = [stage for stage in full_pipeline if stage in self.capabilities]
+
+        # stage times (only for supported stages)
+        default_times = {
             "cutting": 2,
             "mixing": 3,
             "baking": 4,
             "packaging": 2,
         }
+        self.stage_times = {stage: default_times[stage] for stage in self.pipeline_stages}
 
         # estado dos jobs
         self.job_queue = []                 # jobs à espera de começar
@@ -175,16 +180,31 @@ class MachineCNPAgent(FactoryAgent):
                 continue
             if getattr(other, "is_failed", False):
                 continue
-            if stage not in getattr(other, "capabilities", []):
+            if not other.can_handle(stage):
                 continue
             if getattr(other, "current_job", None) is not None:
                 continue  # já ocupada
 
-            # Copiar job para a outra máquina
+            # pipeline da máquina de destino
+            dest_pipeline = other.pipeline_stages
+
+            # etapa atual do job
+            current_stage = job["pipeline"][stage_idx]
+
+            # garantir que a etapa atual existe no pipeline do destinatário
+            if current_stage not in dest_pipeline:
+                # segurança máxima — nunca deveria acontecer por causa de can_handle(),
+                # mas deixamos para garantir solidez
+                continue
+
+            # índice da etapa atual no pipeline do destinatário
+            dest_stage_idx = dest_pipeline.index(current_stage)
+
+            # criar job adaptado ao pipeline da máquina destino
             new_job = {
                 "id": job["id"],
-                "pipeline": list(job["pipeline"]),
-                "current_stage_idx": stage_idx,
+                "pipeline": list(dest_pipeline),
+                "current_stage_idx": dest_stage_idx,
                 "batch": job["batch"].copy(),
             }
 
@@ -200,6 +220,9 @@ class MachineCNPAgent(FactoryAgent):
             # limpar o job desta máquina
             self.current_job = None
             self.current_stage_ticks_remaining = 0
+
+            # garantir que não existe cópia deste job na queue
+            self.job_queue = [j for j in self.job_queue if j["id"] != job["id"]]
 
             # métricas e logs
             self.env.metrics["jobs_delegated"] += 1
@@ -218,6 +241,9 @@ class MachineCNPAgent(FactoryAgent):
         )
         self.current_job = None
         self.current_stage_ticks_remaining = 0
+
+    def can_handle(self, stage):
+        return stage in self.capabilities
 
     # ------------------------------------------------------------------
     # CNP Behaviour
