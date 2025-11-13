@@ -71,7 +71,6 @@ class MachineCNPAgent(FactoryAgent):
         self.job_queue = []                 # jobs à espera de começar
         self.current_job = None             # job atualmente em processamento
         self.current_stage_ticks_remaining = 0
-        self.last_job_id = 0
 
     # ------------------------------------------------------------------
     # SPADE setup
@@ -92,18 +91,20 @@ class MachineCNPAgent(FactoryAgent):
     # ------------------------------------------------------------------
     def create_job_after_delivery(self):
         """
-        Cria um novo job de produção após uma entrega bem sucedida.
-        O job percorre o pipeline definido em self.pipeline_stages.
+        Cria um novo job com ID global vindo do ambiente.
         """
-        self.last_job_id += 1
+        new_id = self.env.get_new_job_id()
+
         job = {
-            "id": self.last_job_id,
+            "id": new_id,
             "pipeline": list(self.pipeline_stages),
             "current_stage_idx": 0,
             "batch": self.batch.copy(),
         }
+
         self.job_queue.append(job)
         return job
+
 
     async def process_current_job_tick(self):
         """
@@ -242,8 +243,65 @@ class MachineCNPAgent(FactoryAgent):
         self.current_job = None
         self.current_stage_ticks_remaining = 0
 
+    async def try_delegate_queued_jobs(self):
+        """
+        Tenta delegar jobs que estão na fila (job_queue) para outras máquinas disponíveis.
+        Cada job é delegado apenas se:
+        - a máquina destino não está falhada
+        - está livre
+        - tem a capability da primeira etapa do pipeline
+        """
+        if not self.job_queue:
+            return
+
+        remaining_queue = []
+
+        for job in self.job_queue:
+            stage = job["pipeline"][0]  # primeira etapa do job
+            delegated = False
+
+            for other in self.env.agents:
+                if other is self:
+                    continue
+                if not getattr(other, "is_machine", False):
+                    continue
+                if getattr(other, "is_failed", False):
+                    continue
+                if getattr(other, "current_job", None) is not None:
+                    continue
+                if not other.can_handle(stage):
+                    continue
+
+                # pipeline adaptado para a máquina destino
+                dest_pipeline = other.pipeline_stages
+                dest_stage_idx = dest_pipeline.index(stage)
+
+                new_job = {
+                    "id": job["id"],
+                    "pipeline": list(dest_pipeline),
+                    "current_stage_idx": dest_stage_idx,
+                    "batch": job["batch"].copy(),
+                }
+
+                other.current_job = new_job
+                other.current_stage_ticks_remaining = other.stage_times[stage]
+
+                await self.log(f"[DELEGATE-QUEUE] Job {job['id']} delegado para {other.agent_name}.")
+                await other.log(f"[DELEGATE-QUEUE] Recebi job {job['id']} da fila da máquina {self.agent_name}.")
+
+                self.env.metrics["jobs_delegated"] += 1
+                delegated = True
+                break
+
+            if not delegated:
+                remaining_queue.append(job)
+
+        self.job_queue = remaining_queue
+
+
     def can_handle(self, stage):
         return stage in self.capabilities
+    
 
     # ------------------------------------------------------------------
     # CNP Behaviour
@@ -265,6 +323,7 @@ class MachineCNPAgent(FactoryAgent):
 
                 # tentar delegar o job atual para outra máquina compatível
                 await agent.try_delegate_current_job()
+                await agent.try_delegate_queued_jobs()
 
                 # notificar manutenção
                 if agent.maintenance:
@@ -281,6 +340,9 @@ class MachineCNPAgent(FactoryAgent):
             # 3) Se não há job em execução, tentar iniciar um da fila
             if await agent.maybe_start_next_job():
                 return
+            
+            # tentar delegar jobs pendentes da fila
+            await agent.try_delegate_queued_jobs()
 
             # 4) Se não há jobs para processar, fazer ciclo de CNP normal
             body = (
