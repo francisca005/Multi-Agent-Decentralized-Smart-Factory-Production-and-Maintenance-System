@@ -5,8 +5,9 @@ from agents.supply_cnp_agent import SupplyCNPAgent
 from agents.machine_cnp_agent import MachineCNPAgent
 from agents.supervisor_agent import SupervisorAgent
 from agents.maintenance_agent import MaintenanceAgent
+from agents.robot_agent import RobotAgent
 
-DOMAIN = "192.168.1.218"
+DOMAIN = "192.168.68.106"
 PWD = "12345"
 
 async def main():
@@ -14,6 +15,17 @@ async def main():
 
     # === Environment ===
     env = FactoryEnvironment()
+
+    env.robots = []
+
+    robot1 = RobotAgent(f"robot1@{DOMAIN}", "pass", env=env, name="R1")
+    robot2 = RobotAgent(f"robot2@{DOMAIN}", "pass", env=env, name="R2")
+
+    env.robots.append(robot1.jid)
+    env.robots.append(robot2.jid)
+
+    await robot1.start(auto_register=True)
+    await robot2.start(auto_register=True)
 
     # === Suppliers ===
     supplierA = SupplyCNPAgent(
@@ -74,6 +86,7 @@ async def main():
     )
     await supervisor.start(auto_register=True)
 
+
     # === Simulation Loop ===
     MAX_TICKS = 500
     idle_ticks = 0
@@ -113,6 +126,8 @@ async def main():
         print(f"{k}: {v}")
 
     # === Stop Agents ===
+    await robot1.stop()
+    await robot2.stop()
     await machine1.stop()
     await machine2.stop()
     await supplierA.stop()
