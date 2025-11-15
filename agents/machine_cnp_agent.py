@@ -416,15 +416,18 @@ class MachineCNPAgent(FactoryAgent):
 
             # esperar INFORM (entrega)
             reply = await self.receive(timeout=agent.inform_timeout)
+
             if reply and reply.metadata.get("performative") == "inform":
-                await agent.log(f"[CNP] INFORM recebido: {reply.body}")
+                await agent.log(f"[DELIVERY] Recebido INFORM de {reply.sender}: {reply.body}")
+
                 if agent.env is not None:
                     agent.env.metrics["cnp_accepts"] += 1
 
-                # criar job após a entrega
+                # criar job após o robot entregar os materiais
                 job = agent.create_job_after_delivery()
-                await agent.log(f"[JOB] Criado job {job['id']} após entrega.")
-            else:
-                await agent.log("[CNP] Timeout à espera de INFORM.")
+                await agent.log(f"[JOB] Criado job {job['id']} após entrega via ROBOT.")
 
+            else:
+                await agent.log("[CNP] Timeout à espera de INFORM (robot não entregou a tempo).")
+                
             await asyncio.sleep(random.uniform(3, 6))
